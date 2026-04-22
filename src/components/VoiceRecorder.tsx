@@ -1,6 +1,7 @@
 'use client';
 
 import { useRef, useState } from 'react';
+import { Icon } from './Icon';
 import type { ExtractedReportFields } from '@/lib/types';
 
 interface Props {
@@ -52,7 +53,7 @@ export function VoiceRecorder({ onResult, disabled }: Props) {
       const data = await res.json();
       if (!res.ok) {
         if (data.demo) {
-          setError('デモ環境ではAI音声解析は無効です。GOOGLE_GENERATIVE_AI_API_KEY を設定してください。');
+          setError('AI音声解析は無効です（GOOGLE_GENERATIVE_AI_API_KEY を設定してください）');
         } else {
           setError(data.error || '解析に失敗しました');
         }
@@ -72,26 +73,38 @@ export function VoiceRecorder({ onResult, disabled }: Props) {
         type="button"
         disabled={disabled || processing}
         onClick={recording ? stop : start}
-        className={`w-full rounded-xl border-2 p-4 transition-all active:scale-95 disabled:opacity-50 ${
+        className={`w-full rounded-xl py-4 px-5 transition-all active:scale-[0.98] disabled:opacity-50 ${
           recording
-            ? 'bg-rose-600 border-rose-600 text-white animate-pulse'
-            : 'bg-violet-600 border-violet-600 text-white hover:bg-violet-700'
+            ? 'bg-red-600 text-white shadow-sm'
+            : processing
+              ? 'bg-slate-200 text-slate-600'
+              : 'bg-slate-900 text-white hover:bg-slate-800 shadow-sm'
         }`}
       >
-        <div className="flex items-center justify-center gap-2">
-          <span className="text-2xl">{recording ? '⏹' : '🎤'}</span>
-          <span className="font-bold">
-            {processing ? 'AI解析中...' : recording ? '録音中（タップで停止）' : '音声で日報を入力'}
-          </span>
+        <div className="flex items-center justify-center gap-2.5">
+          {recording ? (
+            <>
+              <span className="relative flex h-2.5 w-2.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-white"></span>
+              </span>
+              <span className="font-medium">録音中・タップで停止</span>
+            </>
+          ) : processing ? (
+            <>
+              <Icon.Sparkles className="w-4 h-4 animate-pulse" />
+              <span className="font-medium">AIが解析しています...</span>
+            </>
+          ) : (
+            <>
+              <Icon.Mic className="w-5 h-5" />
+              <span className="font-medium">音声で日報を入力</span>
+            </>
+          )}
         </div>
       </button>
       {error && (
-        <p className="text-rose-600 text-xs mt-2 px-1">{error}</p>
-      )}
-      {!recording && !processing && !error && (
-        <p className="text-slate-500 text-xs mt-2 px-1">
-          例：「8時に出勤、8時半出庫、仙台市場に10時着、休憩12時から13時、5時10分帰庫、走行148km、異常なし」
-        </p>
+        <p className="text-red-600 text-xs mt-2 leading-relaxed">{error}</p>
       )}
     </div>
   );
