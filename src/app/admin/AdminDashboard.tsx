@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { Icon } from '@/components/Icon';
-import { loadDemo, todayStr, type DemoData } from '@/lib/demo-store';
+import { loadDemo, todayStr, checkCompliance, type DemoData } from '@/lib/demo-store';
 import type { DailyReport } from '@/lib/types';
 
 export function AdminDashboard() {
@@ -22,16 +22,23 @@ export function AdminDashboard() {
     [data, date]
   );
   const stats = useMemo(() => {
-    if (!data) return { total: 0, submitted: 0, anomalies: 0, totalDeliveries: 0, totalDistance: 0, avgWorkH: 0 };
+    if (!data) return { total: 0, submitted: 0, anomalies: 0, totalDeliveries: 0, totalDistance: 0, complianceIssues: 0, alcoholIssues: 0 };
     const submitted = reportsForDate.filter(r => r.status !== 'draft').length;
     const anomalies = data.anomalies.filter(a => reportsForDate.some(r => r.id === a.daily_report_id)).length;
     const totalDeliveries = reportsForDate.reduce((s, r) => s + (r.delivery_count || 0), 0);
     const totalDistance = reportsForDate.reduce((s, r) => s + (r.total_distance_km || 0), 0);
-    const workHs = reportsForDate
-      .filter(r => r.clock_in_at && r.clock_out_at)
-      .map(r => (new Date(r.clock_out_at!).getTime() - new Date(r.clock_in_at!).getTime()) / 3600000);
-    const avgWorkH = workHs.length > 0 ? workHs.reduce((a, b) => a + b, 0) / workHs.length : 0;
-    return { total: drivers.length, submitted, anomalies, totalDeliveries, totalDistance, avgWorkH };
+    let complianceIssues = 0;
+    let alcoholIssues = 0;
+    for (const r of reportsForDate) {
+      const rBreaks = data.breaks.filter(b => b.daily_report_id === r.id);
+      const c = checkCompliance(r, rBreaks);
+      if (c.duty_warning === 'violation' || c.consecutive_drive_warning === 'violation' || c.rest_warning === 'violation') {
+        complianceIssues++;
+      }
+      const rcs = data.roll_calls.filter(rc => rc.daily_report_id === r.id);
+      if (rcs.some(rc => !rc.alcohol_result_ok)) alcoholIssues++;
+    }
+    return { total: drivers.length, submitted, anomalies, totalDeliveries, totalDistance, complianceIssues, alcoholIssues };
   }, [data, reportsForDate, drivers]);
 
   async function generateSummary() {
@@ -81,6 +88,11 @@ export function AdminDashboard() {
       }
       const order = { low: 1, medium: 2, high: 3 } as const;
       const maxSev = reportAnomalies.reduce((m, a) => (order[a.severity] > order[m as keyof typeof order] ? a.severity : m), '' as string);
+      const rcs = r ? data.roll_calls.filter(rc => rc.daily_report_id === r.id) : [];
+      const preTrip = rcs.find(rc => rc.type === 'pre_trip');
+      const postTrip = rcs.find(rc => rc.type === 'post_trip');
+      const preInspection = r ? data.inspections.find(i => i.daily_report_id === r.id && i.inspection_type === 'pre_departure') : null;
+      const compliance = r ? checkCompliance(r, reportBreaks) : null;
       return {
         '日付': date,
         'ドライバー': driver.full_name,
@@ -90,15 +102,28 @@ export function AdminDashboard() {
         '帰庫': r?.return_at ? fmtHM(r.return_at) : '',
         '退勤': r?.clock_out_at ? fmtHM(r.clock_out_at) : '',
         '拘束時間(h)': workHours,
+        '連続運転(分)': compliance?.max_consecutive_drive_min ?? '',
+        '出庫前アルコール(mg/L)': preTrip?.alcohol_value_mg ?? '',
+        '出庫前判定': preTrip ? (preTrip.alcohol_result_ok ? '適正' : '要対応') : '未実施',
+        '退勤前アルコール(mg/L)': postTrip?.alcohol_value_mg ?? '',
+        '退勤前判定': postTrip ? (postTrip.alcohol_result_ok ? '適正' : '要対応') : '未実施',
+        '健康状態': preTrip?.health_status ? ({ good: '良好', normal: '普通', poor: '不良' } as Record<string, string>)[preTrip.health_status] : '',
+        '日常点検': preInspection ? '実施' : '未実施',
+        '点検異常': preInspection ? countInspectionNG(preInspection) : '',
         '出庫メーター': r?.odometer_start || '',
         '帰庫メーター': r?.odometer_end || '',
         '走行距離(km)': distance ?? '',
         '配送件数': r?.delivery_count || 0,
         '休憩回数': reportBreaks.length,
+        '休憩合計(分)': compliance?.total_break_min ?? '',
         '給油': r?.refueled ? 'あり' : '',
+        '給油量(L)': r?.refuel_liters ?? '',
+        '給油金額(円)': r?.refuel_amount_yen ?? '',
         '高速利用': r?.used_highway ? 'あり' : '',
+        '高速料金(円)': r?.highway_fee_yen ?? '',
         '異常件数': reportAnomalies.length,
         '異常重要度': maxSev,
+        '労務違反': compliance && (compliance.duty_warning === 'violation' || compliance.consecutive_drive_warning === 'violation' || compliance.rest_warning === 'violation') ? 'あり' : '',
         '備考': r?.notes || '',
         '提出ステータス': r?.status === 'submitted' ? '提出済' : r?.status === 'approved' ? '承認済' : r ? '下書き' : '未着手',
       };
@@ -165,11 +190,13 @@ export function AdminDashboard() {
         </div>
 
         {/* サマリー */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
           <SummaryCard label="提出率" value={`${submissionRate}%`} sub={`${stats.submitted} / ${stats.total} 名`} highlight={submissionRate < 100 ? 'warn' : 'ok'} />
           <SummaryCard label="配送件数" value={stats.totalDeliveries} sub="本日合計" />
-          <SummaryCard label="走行距離" value={stats.totalDistance.toLocaleString()} sub="km · 全体" />
+          <SummaryCard label="走行距離" value={stats.totalDistance.toLocaleString()} sub="km" />
           <SummaryCard label="異常報告" value={stats.anomalies} sub="件" highlight={stats.anomalies > 0 ? 'alert' : 'ok'} />
+          <SummaryCard label="労務違反" value={stats.complianceIssues} sub="名" highlight={stats.complianceIssues > 0 ? 'alert' : 'ok'} />
+          <SummaryCard label="アルコール" value={stats.alcoholIssues} sub="要対応" highlight={stats.alcoholIssues > 0 ? 'alert' : 'ok'} />
         </div>
 
         {/* AI要約 */}
@@ -324,6 +351,14 @@ function fmtHM(iso: string): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
+function countInspectionNG(i: import('@/lib/types').VehicleInspection): number {
+  let n = 0;
+  const keys: Array<keyof typeof i> = ['brake_ok', 'tire_pressure_ok', 'tire_damage_ok', 'battery_ok', 'engine_oil_ok', 'coolant_ok', 'washer_fluid_ok', 'lights_ok', 'wipers_ok', 'body_damage_ok'];
+  for (const k of keys) if (i[k] === false) n++;
+  if (i.obd_warning) n++;
+  return n;
+}
+
 function formatDateLong(date: string): string {
   const d = new Date(date);
   const days = ['日', '月', '火', '水', '木', '金', '土'];
@@ -342,6 +377,12 @@ function ReportDetailModal({
   const deliveries = data.deliveries.filter(d => d.daily_report_id === report.id);
   const breaks = data.breaks.filter(b => b.daily_report_id === report.id);
   const anomalies = data.anomalies.filter(a => a.daily_report_id === report.id);
+  const rollCalls = data.roll_calls.filter(rc => rc.daily_report_id === report.id);
+  const inspections = data.inspections.filter(i => i.daily_report_id === report.id);
+  const preTrip = rollCalls.find(rc => rc.type === 'pre_trip');
+  const postTrip = rollCalls.find(rc => rc.type === 'post_trip');
+  const preInspection = inspections.find(i => i.inspection_type === 'pre_departure');
+  const compliance = checkCompliance(report, breaks);
 
   return (
     <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end md:items-center justify-center backdrop-blur-sm" onClick={onClose}>
@@ -373,23 +414,81 @@ function ReportDetailModal({
             <Cell k="休憩" v={`${breaks.length} 回`} large />
           </div>
 
+          {/* 労務遵守 */}
+          {(compliance.duty_warning || compliance.consecutive_drive_warning || compliance.rest_warning) && (
+            <DetailSection title="労務遵守（改善基準告示）">
+              <div className="grid grid-cols-3 gap-3">
+                <ComplianceCell
+                  label="拘束時間"
+                  value={compliance.duty_hours !== null ? `${compliance.duty_hours.toFixed(1)} h` : '—'}
+                  status={compliance.duty_warning}
+                  threshold="13h警戒 / 15h違反"
+                />
+                <ComplianceCell
+                  label="連続運転"
+                  value={compliance.max_consecutive_drive_min !== null ? `${compliance.max_consecutive_drive_min} 分` : '—'}
+                  status={compliance.consecutive_drive_warning}
+                  threshold="3.5h警戒 / 4h違反"
+                />
+                <ComplianceCell
+                  label="休息期間"
+                  value={compliance.rest_hours !== null ? `${compliance.rest_hours.toFixed(1)} h` : '—'}
+                  status={compliance.rest_warning}
+                  threshold="11h警戒 / 9h違反"
+                />
+              </div>
+            </DetailSection>
+          )}
+
+          {/* 点呼 */}
+          {(preTrip || postTrip) && (
+            <DetailSection title="点呼記録（アルコールチェック）">
+              <div className="space-y-2">
+                {preTrip && <RollCallRow label="出庫前" rc={preTrip} />}
+                {postTrip && <RollCallRow label="退勤前" rc={postTrip} />}
+              </div>
+            </DetailSection>
+          )}
+
+          {/* 始業前点検 */}
+          {preInspection && (
+            <DetailSection title="始業前点検（日常点検）">
+              <InspectionResultView inspection={preInspection} />
+            </DetailSection>
+          )}
+
           <div className="grid grid-cols-2 gap-3">
             <Cell k="出庫メーター" v={report.odometer_start ? `${report.odometer_start.toLocaleString()} km` : '—'} />
             <Cell k="帰庫メーター" v={report.odometer_end ? `${report.odometer_end.toLocaleString()} km` : '—'} />
-            <Cell k="給油" v={report.refueled ? 'あり' : 'なし'} />
-            <Cell k="高速" v={report.used_highway ? '利用' : '未利用'} />
+            <Cell
+              k="給油"
+              v={report.refueled
+                ? `${report.refuel_liters !== null ? `${report.refuel_liters} L` : 'あり'}${report.refuel_amount_yen !== null ? ` · ${report.refuel_amount_yen.toLocaleString()}円` : ''}`
+                : 'なし'}
+            />
+            <Cell
+              k="高速"
+              v={report.used_highway
+                ? `利用${report.highway_fee_yen !== null ? ` · ${report.highway_fee_yen.toLocaleString()}円` : ''}`
+                : '未利用'}
+            />
           </div>
 
           {deliveries.length > 0 && (
             <DetailSection title={`配送実績 · ${deliveries.length} 件`}>
               <ul className="divide-y divide-slate-100">
                 {deliveries.map(d => (
-                  <li key={d.id} className="py-2.5 flex items-center justify-between">
-                    <span className="text-sm font-medium text-slate-900">{d.destination}</span>
-                    <span className="text-xs text-slate-500 tabular-nums">
-                      {d.arrived_at && fmtHM(d.arrived_at)}
-                      {d.completed_at && ` — ${fmtHM(d.completed_at)}`}
-                    </span>
+                  <li key={d.id} className="py-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium text-slate-900">{d.destination}</span>
+                      <span className="text-xs text-slate-500 tabular-nums">
+                        {d.arrived_at && fmtHM(d.arrived_at)}
+                        {d.completed_at && ` — ${fmtHM(d.completed_at)}`}
+                      </span>
+                    </div>
+                    {d.cargo_item && (
+                      <div className="mt-1 text-xs text-slate-500">積載: {d.cargo_item}</div>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -470,4 +569,106 @@ function categoryLabel(c: string): string {
 }
 function sevLabel(s: string): string {
   return ({ low: '軽微', medium: '中程度', high: '重大' } as Record<string, string>)[s] || s;
+}
+
+function ComplianceCell({
+  label, value, status, threshold,
+}: {
+  label: string;
+  value: string;
+  status: 'ok' | 'caution' | 'violation' | null;
+  threshold: string;
+}) {
+  const cls = status === 'violation' ? 'bg-red-50 border-red-200 text-red-700'
+    : status === 'caution' ? 'bg-amber-50 border-amber-200 text-amber-700'
+    : 'bg-emerald-50 border-emerald-200 text-emerald-700';
+  return (
+    <div className={`rounded-lg border ${cls} p-3`}>
+      <div className="text-[10px] font-medium tracking-wider uppercase opacity-80">{label}</div>
+      <div className="mt-0.5 text-lg font-semibold tabular-nums tracking-tight">{value}</div>
+      <div className="text-[10px] mt-1 opacity-70">{threshold}</div>
+    </div>
+  );
+}
+
+function RollCallRow({ label, rc }: { label: string; rc: import('@/lib/types').RollCall }) {
+  return (
+    <div className={`rounded-lg border p-3 ${rc.alcohol_result_ok ? 'bg-emerald-50 border-emerald-200' : 'bg-red-50 border-red-200'}`}>
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-slate-700">{label}</span>
+        <span className="text-xs text-slate-500 tabular-nums">{fmtHM(rc.performed_at)}</span>
+      </div>
+      <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
+        <div>
+          <div className="text-slate-500">アルコール</div>
+          <div className="font-semibold tabular-nums">{rc.alcohol_value_mg?.toFixed(2) ?? '—'} <span className="font-normal text-slate-400">mg/L</span></div>
+        </div>
+        <div>
+          <div className="text-slate-500">確認方法</div>
+          <div className="font-medium">{({ face_to_face: '対面', remote: '遠隔', self: '自己' } as Record<string, string>)[rc.alcohol_check_method]}</div>
+        </div>
+        <div>
+          <div className="text-slate-500">検知器</div>
+          <div className="font-medium">{rc.alcohol_detector_used ? '使用' : '未使用'}</div>
+        </div>
+        {rc.health_status && (
+          <div>
+            <div className="text-slate-500">健康</div>
+            <div className="font-medium">{({ good: '良好', normal: '普通', poor: '不良' } as Record<string, string>)[rc.health_status]}</div>
+          </div>
+        )}
+        {rc.fatigue_level && (
+          <div>
+            <div className="text-slate-500">疲労</div>
+            <div className="font-medium">{({ none: 'なし', mild: '軽度', severe: '重度' } as Record<string, string>)[rc.fatigue_level]}</div>
+          </div>
+        )}
+        {rc.sleep_hours !== null && (
+          <div>
+            <div className="text-slate-500">睡眠</div>
+            <div className="font-medium tabular-nums">{rc.sleep_hours} <span className="font-normal text-slate-400">h</span></div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function InspectionResultView({ inspection }: { inspection: import('@/lib/types').VehicleInspection }) {
+  const items: Array<{ label: string; ok: boolean | null }> = [
+    { label: 'ブレーキ', ok: inspection.brake_ok },
+    { label: 'タイヤ空気圧', ok: inspection.tire_pressure_ok },
+    { label: 'タイヤ損傷', ok: inspection.tire_damage_ok },
+    { label: 'ライト', ok: inspection.lights_ok },
+    { label: 'エンジンオイル', ok: inspection.engine_oil_ok },
+    { label: '冷却水', ok: inspection.coolant_ok },
+    { label: 'バッテリー', ok: inspection.battery_ok },
+    { label: 'ウォッシャー液', ok: inspection.washer_fluid_ok },
+    { label: 'ワイパー', ok: inspection.wipers_ok },
+    { label: '車体・荷台', ok: inspection.body_damage_ok },
+  ];
+  const ng = items.filter(i => i.ok === false).map(i => i.label);
+  if (inspection.obd_warning) ng.push('OBD警告灯');
+  return (
+    <div>
+      {ng.length === 0 ? (
+        <p className="text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+          ✓ 全項目 異常なし
+        </p>
+      ) : (
+        <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
+          <div className="font-semibold mb-1">{ng.length} 項目に異常</div>
+          <div>{ng.join('、')}</div>
+        </div>
+      )}
+      {inspection.refrigeration_temp_c !== null && (
+        <p className="text-xs text-slate-600 mt-2">
+          冷凍温度: <span className="font-medium tabular-nums">{inspection.refrigeration_temp_c}℃</span>
+        </p>
+      )}
+      {inspection.notes && (
+        <p className="text-xs text-slate-700 mt-2">{inspection.notes}</p>
+      )}
+    </div>
+  );
 }

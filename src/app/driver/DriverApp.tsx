@@ -5,19 +5,16 @@ import { useEffect, useMemo, useState } from 'react';
 import { TimeButton } from '@/components/TimeButton';
 import { VoiceRecorder } from '@/components/VoiceRecorder';
 import { OdometerCapture } from '@/components/OdometerCapture';
+import { RollCallSection } from '@/components/RollCallSection';
+import { InspectionSection } from '@/components/InspectionSection';
 import { Icon } from '@/components/Icon';
 import {
-  loadDemo,
-  saveDemo,
-  getOrCreateTodayReport,
-  updateReport,
-  uid,
-  todayStr,
-  type DemoData,
+  loadDemo, saveDemo, getOrCreateTodayReport, updateReport, uid, todayStr,
+  checkCompliance, type DemoData,
 } from '@/lib/demo-store';
 import type {
-  DailyReport, Delivery, Break, Anomaly,
-  ExtractedReportFields, AnomalyCategory, AnomalySeverity,
+  DailyReport, Delivery, ExtractedReportFields,
+  AnomalyCategory, AnomalySeverity, RollCall, VehicleInspection, ComplianceCheck,
 } from '@/lib/types';
 
 export function DriverApp() {
@@ -37,89 +34,93 @@ export function DriverApp() {
 
   const driver = data.profiles.find(p => p.id === data.currentDriverId);
   const drivers = data.profiles.filter(p => p.role === 'driver');
+  const vehicle = data.vehicles.find(v => v.id === report.vehicle_id);
+  const isRefrigerated = vehicle?.vehicle_type?.includes('冷凍') || false;
   const deliveries = data.deliveries.filter(d => d.daily_report_id === report.id);
   const breaks = data.breaks.filter(b => b.daily_report_id === report.id);
   const anomalies = data.anomalies.filter(a => a.daily_report_id === report.id);
+  const rollCalls = data.roll_calls.filter(r => r.daily_report_id === report.id);
+  const inspections = data.inspections.filter(i => i.daily_report_id === report.id);
+  const preTrip = rollCalls.find(r => r.type === 'pre_trip') || null;
+  const postTrip = rollCalls.find(r => r.type === 'post_trip') || null;
+  const preInspection = inspections.find(i => i.inspection_type === 'pre_departure') || null;
   const openBreak = breaks.find(b => b.end_at === null);
+
+  const prevReport = data.reports
+    .filter(r => r.driver_id === report.driver_id && r.report_date < report.report_date && r.clock_out_at)
+    .sort((a, b) => b.report_date.localeCompare(a.report_date))[0];
+  const compliance = checkCompliance(report, breaks, prevReport);
 
   function refresh() {
     const d = loadDemo();
     setData(d);
     setReport(d.reports.find(r => r.id === report!.id) || null);
   }
-
   function patch(p: Partial<DailyReport>) {
     updateReport(data!, report!.id, p);
     refresh();
   }
-
   function switchDriver(id: string) {
     const d = { ...data!, currentDriverId: id };
     saveDemo(d);
     setData(d);
     setReport(getOrCreateTodayReport(d, id));
   }
-
   function stamp(field: 'clock_in_at' | 'depart_at' | 'return_at' | 'clock_out_at') {
     patch({ [field]: new Date().toISOString() });
   }
-
   function startBreak() {
-    data!.breaks.push({
-      id: uid('break'),
-      daily_report_id: report!.id,
-      start_at: new Date().toISOString(),
-      end_at: null,
-    });
-    saveDemo(data!);
-    refresh();
+    data!.breaks.push({ id: uid('break'), daily_report_id: report!.id, start_at: new Date().toISOString(), end_at: null });
+    saveDemo(data!); refresh();
   }
-
   function endBreak() {
     const open = data!.breaks.find(b => b.daily_report_id === report!.id && b.end_at === null);
-    if (open) {
-      open.end_at = new Date().toISOString();
-      saveDemo(data!);
-      refresh();
-    }
+    if (open) { open.end_at = new Date().toISOString(); saveDemo(data!); refresh(); }
   }
-
-  function addDelivery(destination: string) {
+  function addDelivery(destination: string, cargo?: string) {
     if (!destination.trim()) return;
     data!.deliveries.push({
-      id: uid('delivery'),
-      daily_report_id: report!.id,
+      id: uid('delivery'), daily_report_id: report!.id,
       destination: destination.trim(),
-      arrived_at: new Date().toISOString(),
-      completed_at: null,
-      notes: null,
-      receipt_image_url: null,
+      arrived_at: new Date().toISOString(), completed_at: null,
+      cargo_item: cargo || null, cargo_quantity: null, cargo_weight_kg: null,
+      notes: null, receipt_image_url: null,
     });
     saveDemo(data!);
     patch({ delivery_count: deliveries.length + 1 });
   }
-
   function completeDelivery(id: string) {
     const d = data!.deliveries.find(x => x.id === id);
     if (d) { d.completed_at = new Date().toISOString(); saveDemo(data!); refresh(); }
   }
-
   function deleteDelivery(id: string) {
     data!.deliveries = data!.deliveries.filter(x => x.id !== id);
     saveDemo(data!);
     patch({ delivery_count: data!.deliveries.filter(d => d.daily_report_id === report!.id).length });
   }
-
   function addAnomaly(category: AnomalyCategory, severity: AnomalySeverity, description: string) {
     data!.anomalies.push({
-      id: uid('anomaly'),
-      daily_report_id: report!.id,
-      category, severity, description,
-      image_url: null, resolved: false,
+      id: uid('anomaly'), daily_report_id: report!.id,
+      category, severity, description, image_url: null, resolved: false,
     });
     saveDemo(data!);
     patch({ has_anomaly: true });
     setShowAnomaly(false);
+  }
+  function saveRollCall(type: 'pre_trip' | 'post_trip', body: Omit<RollCall, 'id' | 'daily_report_id'>) {
+    data!.roll_calls = data!.roll_calls.filter(r => !(r.daily_report_id === report!.id && r.type === type));
+    data!.roll_calls.push({ id: uid('rc'), daily_report_id: report!.id, ...body });
+    saveDemo(data!);
+    refresh();
+  }
+  function saveInspection(body: Omit<VehicleInspection, 'id' | 'daily_report_id' | 'inspection_type'>) {
+    data!.inspections = data!.inspections.filter(i => !(i.daily_report_id === report!.id && i.inspection_type === 'pre_departure'));
+    data!.inspections.push({
+      id: uid('inspection'), daily_report_id: report!.id,
+      inspection_type: 'pre_departure', ...body,
+    });
+    saveDemo(data!);
+    refresh();
   }
 
   function applyAIFields(fields: ExtractedReportFields) {
@@ -130,12 +131,10 @@ export function DriverApp() {
       if (!m) return undefined;
       return new Date(`${today}T${m[1].padStart(2, '0')}:${m[2]}:00`).toISOString();
     };
-
-    const p: Partial<DailyReport> = {
-      raw_voice_text: fields.raw_text || null,
-      notes: fields.notes || report!.notes,
-    };
+    const p: Partial<DailyReport> = { raw_voice_text: fields.raw_text || null, notes: fields.notes || report!.notes };
     if (typeof fields.refueled === 'boolean') p.refueled = fields.refueled;
+    if (typeof fields.refuel_liters === 'number') p.refuel_liters = fields.refuel_liters;
+    if (typeof fields.refuel_amount_yen === 'number') p.refuel_amount_yen = fields.refuel_amount_yen;
     if (typeof fields.used_highway === 'boolean') p.used_highway = fields.used_highway;
     if (fields.odometer_start) p.odometer_start = fields.odometer_start;
     if (fields.odometer_end) p.odometer_end = fields.odometer_end;
@@ -150,13 +149,14 @@ export function DriverApp() {
     if (fields.deliveries) {
       for (const d of fields.deliveries) {
         data!.deliveries.push({
-          id: uid('delivery'),
-          daily_report_id: report!.id,
+          id: uid('delivery'), daily_report_id: report!.id,
           destination: d.destination,
           arrived_at: toIso(d.arrived_time) || null,
           completed_at: toIso(d.completed_time) || null,
-          notes: d.notes || null,
-          receipt_image_url: null,
+          cargo_item: d.cargo_item || null,
+          cargo_quantity: d.cargo_quantity || null,
+          cargo_weight_kg: null,
+          notes: d.notes || null, receipt_image_url: null,
         });
       }
       const newCount = data!.deliveries.filter(x => x.daily_report_id === report!.id).length;
@@ -167,18 +167,15 @@ export function DriverApp() {
         const start = toIso(b.start_time);
         if (!start) continue;
         data!.breaks.push({
-          id: uid('break'),
-          daily_report_id: report!.id,
-          start_at: start,
-          end_at: toIso(b.end_time) || null,
+          id: uid('break'), daily_report_id: report!.id,
+          start_at: start, end_at: toIso(b.end_time) || null,
         });
       }
     }
     if (fields.anomalies) {
       for (const a of fields.anomalies) {
         data!.anomalies.push({
-          id: uid('anomaly'),
-          daily_report_id: report!.id,
+          id: uid('anomaly'), daily_report_id: report!.id,
           category: a.category, severity: a.severity, description: a.description,
           image_url: null, resolved: false,
         });
@@ -190,9 +187,12 @@ export function DriverApp() {
   }
 
   function submit() {
-    if (!report!.clock_in_at) {
-      alert('出勤時刻が未入力です');
-      return;
+    const issues: string[] = [];
+    if (!report!.clock_in_at) issues.push('出勤時刻');
+    if (!preTrip) issues.push('出庫前点呼（アルコールチェック）');
+    if (!preInspection) issues.push('始業前点検');
+    if (issues.length > 0) {
+      if (!confirm(`未入力の項目があります:\n・${issues.join('\n・')}\n\nこのまま提出しますか？`)) return;
     }
     patch({ status: 'submitted', submitted_at: new Date().toISOString() });
     alert('日報を提出しました');
@@ -201,9 +201,6 @@ export function DriverApp() {
   const distance = report.total_distance_km ?? (
     report.odometer_start && report.odometer_end ? report.odometer_end - report.odometer_start : null
   );
-  const workHours = report.clock_in_at
-    ? ((report.clock_out_at ? new Date(report.clock_out_at).getTime() : Date.now()) - new Date(report.clock_in_at).getTime()) / 3600000
-    : null;
 
   return (
     <div className="min-h-screen bg-slate-50 pb-44">
@@ -223,21 +220,13 @@ export function DriverApp() {
       </header>
 
       <div className="max-w-md mx-auto px-4 pt-5 space-y-4">
-        {/* サマリーカード */}
-        <section className="bg-white rounded-2xl border border-slate-200 p-5">
-          <div className="flex items-baseline justify-between mb-4">
-            <div>
-              <div className="text-xs font-medium text-slate-500 tracking-wide">{formatDateLabel(report.report_date)}</div>
-              <div className="text-lg font-semibold text-slate-900 tracking-tight mt-0.5">{driver?.full_name}</div>
-            </div>
-            <StatusBadge status={report.status} />
-          </div>
-          <div className="grid grid-cols-3 divide-x divide-slate-100">
-            <Stat label="配送" value={`${report.delivery_count}`} unit="件" />
-            <Stat label="走行" value={distance !== null ? distance.toLocaleString() : '—'} unit="km" />
-            <Stat label="拘束" value={workHours !== null ? workHours.toFixed(1) : '—'} unit="h" />
-          </div>
-        </section>
+        {/* サマリーカード（労務警告統合） */}
+        <SummaryCardWithCompliance
+          report={report}
+          driver={driver?.full_name || ''}
+          distance={distance}
+          compliance={compliance}
+        />
 
         {/* 車両 */}
         <Section title="車両">
@@ -253,7 +242,33 @@ export function DriverApp() {
           </select>
         </Section>
 
-        {/* 出退勤 */}
+        {/* 出庫前 点呼（アルコールチェック+健康確認） */}
+        <Section
+          title="出庫前 点呼"
+          right={preTrip && <Icon.Check className="w-4 h-4 text-emerald-600" />}
+          required={!preTrip}
+        >
+          <RollCallSection
+            type="pre_trip"
+            rollCall={preTrip}
+            onSave={(rc) => saveRollCall('pre_trip', rc)}
+          />
+        </Section>
+
+        {/* 始業前点検 */}
+        <Section
+          title="始業前点検（日常点検）"
+          right={preInspection && <Icon.Check className="w-4 h-4 text-emerald-600" />}
+          required={!preInspection}
+        >
+          <InspectionSection
+            inspection={preInspection}
+            isRefrigerated={isRefrigerated}
+            onSave={saveInspection}
+          />
+        </Section>
+
+        {/* タイムスタンプ */}
         <Section title="タイムスタンプ">
           <div className="grid grid-cols-2 gap-2">
             <TimeButton label="出勤" value={report.clock_in_at} onClick={() => stamp('clock_in_at')} />
@@ -266,7 +281,9 @@ export function DriverApp() {
         {/* 休憩 */}
         <Section
           title="休憩"
-          right={<span className="text-xs text-slate-500">{breaks.length === 0 ? '未記録' : `計 ${breaks.length} 回`}</span>}
+          right={<span className="text-xs text-slate-500">
+            {breaks.length === 0 ? '未記録' : `${breaks.length} 回 / ${compliance.total_break_min} 分`}
+          </span>}
         >
           {openBreak ? (
             <button
@@ -326,12 +343,7 @@ export function DriverApp() {
         </Section>
 
         {/* 給油・高速 */}
-        <Section title="その他">
-          <div className="grid grid-cols-2 gap-2">
-            <Toggle label="給油あり" value={report.refueled} onChange={(v) => patch({ refueled: v })} />
-            <Toggle label="高速利用" value={report.used_highway} onChange={(v) => patch({ used_highway: v })} />
-          </div>
-        </Section>
+        <FuelHighwaySection report={report} onPatch={patch} />
 
         {/* 異常報告 */}
         <Section
@@ -369,7 +381,19 @@ export function DriverApp() {
           )}
         </Section>
 
-        {/* 音声入力（文字起こし） */}
+        {/* 退勤前 点呼 */}
+        <Section
+          title="退勤前 点呼"
+          right={postTrip && <Icon.Check className="w-4 h-4 text-emerald-600" />}
+        >
+          <RollCallSection
+            type="post_trip"
+            rollCall={postTrip}
+            onSave={(rc) => saveRollCall('post_trip', rc)}
+          />
+        </Section>
+
+        {/* 文字起こし */}
         {report.raw_voice_text && (
           <Section title="音声入力（AI文字起こし）">
             <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap bg-slate-50 rounded-lg p-3">
@@ -379,7 +403,7 @@ export function DriverApp() {
         )}
       </div>
 
-      {/* ボトムバー: 音声入力 + 提出 */}
+      {/* ボトムバー */}
       <div className="fixed bottom-0 left-0 right-0 bg-white/95 backdrop-blur-md border-t border-slate-200">
         <div className="max-w-md mx-auto px-4 py-3 space-y-2">
           <VoiceRecorder onResult={applyAIFields} />
@@ -388,13 +412,8 @@ export function DriverApp() {
             disabled={report.status !== 'draft'}
             className="w-full py-3.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium disabled:bg-slate-200 disabled:text-slate-400 transition-all active:scale-[0.99] inline-flex items-center justify-center gap-2"
           >
-            {report.status === 'draft' ? (
-              <>
-                <Icon.Check className="w-4 h-4" />日報を提出
-              </>
-            ) : (
-              <><Icon.Check className="w-4 h-4" />提出済み</>
-            )}
+            <Icon.Check className="w-4 h-4" />
+            {report.status === 'draft' ? '日報を提出' : '提出済み'}
           </button>
         </div>
       </div>
@@ -404,14 +423,72 @@ export function DriverApp() {
 
 // ====== Subcomponents ======
 
-function Section({ title, right, children }: { title: string; right?: React.ReactNode; children: React.ReactNode }) {
+function Section({
+  title, right, required, children,
+}: {
+  title: string; right?: React.ReactNode; required?: boolean; children: React.ReactNode;
+}) {
   return (
     <section>
       <div className="flex items-baseline justify-between mb-2 px-1">
-        <h3 className="text-xs font-semibold text-slate-500 tracking-wider uppercase">{title}</h3>
+        <div className="flex items-center gap-1.5">
+          <h3 className="text-xs font-semibold text-slate-500 tracking-wider uppercase">{title}</h3>
+          {required && <span className="text-[10px] font-medium text-red-500">必須</span>}
+        </div>
         {right}
       </div>
       <div className="bg-white rounded-2xl border border-slate-200 p-4">{children}</div>
+    </section>
+  );
+}
+
+function SummaryCardWithCompliance({
+  report, driver, distance, compliance,
+}: {
+  report: DailyReport;
+  driver: string;
+  distance: number | null;
+  compliance: ComplianceCheck;
+}) {
+  const warnings: Array<{ label: string; level: 'caution' | 'violation' }> = [];
+  if (compliance.duty_warning === 'violation') warnings.push({ label: `拘束 ${compliance.duty_hours?.toFixed(1)}h`, level: 'violation' });
+  else if (compliance.duty_warning === 'caution') warnings.push({ label: `拘束 ${compliance.duty_hours?.toFixed(1)}h`, level: 'caution' });
+  if (compliance.consecutive_drive_warning === 'violation') warnings.push({ label: `連続運転 ${compliance.max_consecutive_drive_min}分`, level: 'violation' });
+  else if (compliance.consecutive_drive_warning === 'caution') warnings.push({ label: `連続運転 ${compliance.max_consecutive_drive_min}分`, level: 'caution' });
+  if (compliance.rest_warning === 'violation') warnings.push({ label: `休息 ${compliance.rest_hours?.toFixed(1)}h`, level: 'violation' });
+  else if (compliance.rest_warning === 'caution') warnings.push({ label: `休息 ${compliance.rest_hours?.toFixed(1)}h`, level: 'caution' });
+
+  return (
+    <section className="bg-white rounded-2xl border border-slate-200 p-5">
+      <div className="flex items-baseline justify-between mb-4">
+        <div>
+          <div className="text-xs font-medium text-slate-500 tracking-wide">{formatDateLabel(report.report_date)}</div>
+          <div className="text-lg font-semibold text-slate-900 tracking-tight mt-0.5">{driver}</div>
+        </div>
+        <StatusBadge status={report.status} />
+      </div>
+      <div className="grid grid-cols-3 divide-x divide-slate-100 mb-3">
+        <Stat label="配送" value={`${report.delivery_count}`} unit="件" />
+        <Stat label="走行" value={distance !== null ? distance.toLocaleString() : '—'} unit="km" />
+        <Stat label="拘束" value={compliance.duty_hours !== null ? compliance.duty_hours.toFixed(1) : '—'} unit="h" />
+      </div>
+      {warnings.length > 0 && (
+        <div className="pt-3 border-t border-slate-100 flex flex-wrap gap-1.5">
+          {warnings.map((w, i) => (
+            <span
+              key={i}
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border ${
+                w.level === 'violation'
+                  ? 'bg-red-50 text-red-700 border-red-200'
+                  : 'bg-amber-50 text-amber-700 border-amber-200'
+              }`}
+            >
+              <Icon.Alert className="w-3 h-3" />
+              {w.label}{w.level === 'violation' ? ' 違反' : ' 警戒'}
+            </span>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -438,19 +515,77 @@ function StatusBadge({ status }: { status: DailyReport['status'] }) {
   return <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium border ${m.c}`}>{m.t}</span>;
 }
 
-function Toggle({ label, value, onChange }: { label: string; value: boolean; onChange: (v: boolean) => void }) {
+function FuelHighwaySection({
+  report, onPatch,
+}: {
+  report: DailyReport;
+  onPatch: (p: Partial<DailyReport>) => void;
+}) {
   return (
-    <button
-      type="button"
-      onClick={() => onChange(!value)}
-      className={`py-2.5 rounded-lg text-sm font-medium border transition-all ${
-        value
-          ? 'bg-slate-900 text-white border-slate-900'
-          : 'bg-white text-slate-600 border-slate-200 hover:border-slate-400'
-      }`}
-    >
-      {value && '✓ '}{label}
-    </button>
+    <Section title="経費">
+      <div className="space-y-3">
+        <div className="rounded-lg border border-slate-200 p-3">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-medium text-slate-700">給油</span>
+            <button
+              onClick={() => onPatch({ refueled: !report.refueled })}
+              className={`px-3 py-1 rounded-full text-xs font-medium border transition-all ${
+                report.refueled ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-500 border-slate-200'
+              }`}
+            >{report.refueled ? 'あり' : 'なし'}</button>
+          </div>
+          {report.refueled && (
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[10px] text-slate-400 mb-0.5">数量（L）</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  value={report.refuel_liters ?? ''}
+                  onChange={(e) => onPatch({ refuel_liters: e.target.value ? parseFloat(e.target.value) : null })}
+                  placeholder="0"
+                  className="w-full text-sm tabular-nums rounded-lg border border-slate-200 px-2.5 py-2 focus:outline-none focus:ring-2 focus:ring-slate-900"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] text-slate-400 mb-0.5">金額（円）</label>
+                <input
+                  type="number"
+                  value={report.refuel_amount_yen ?? ''}
+                  onChange={(e) => onPatch({ refuel_amount_yen: e.target.value ? parseInt(e.target.value, 10) : null })}
+                  placeholder="0"
+                  className="w-full text-sm tabular-nums rounded-lg border border-slate-200 px-2.5 py-2 focus:outline-none focus:ring-2 focus:ring-slate-900"
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-lg border border-slate-200 p-3">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-medium text-slate-700">高速道路</span>
+            <button
+              onClick={() => onPatch({ used_highway: !report.used_highway })}
+              className={`px-3 py-1 rounded-full text-xs font-medium border transition-all ${
+                report.used_highway ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-500 border-slate-200'
+              }`}
+            >{report.used_highway ? '利用' : '未利用'}</button>
+          </div>
+          {report.used_highway && (
+            <div>
+              <label className="block text-[10px] text-slate-400 mb-0.5">料金（円）</label>
+              <input
+                type="number"
+                value={report.highway_fee_yen ?? ''}
+                onChange={(e) => onPatch({ highway_fee_yen: e.target.value ? parseInt(e.target.value, 10) : null })}
+                placeholder="0"
+                className="w-full text-sm tabular-nums rounded-lg border border-slate-200 px-2.5 py-2 focus:outline-none focus:ring-2 focus:ring-slate-900"
+              />
+            </div>
+          )}
+        </div>
+      </div>
+    </Section>
   );
 }
 
@@ -458,13 +593,11 @@ function fmtHM(iso: string): string {
   const d = new Date(iso);
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
-
 function formatDateLabel(date: string): string {
   const d = new Date(date);
   const days = ['日', '月', '火', '水', '木', '金', '土'];
   return `${d.getMonth() + 1}月${d.getDate()}日（${days[d.getDay()]}）`;
 }
-
 function categoryLabel(c: AnomalyCategory): string {
   return { vehicle: '車両異常', delay: '遅延', accident: '事故', damage: '荷物破損', near_miss: 'ヒヤリハット', other: 'その他' }[c];
 }
@@ -476,32 +609,55 @@ function DeliveriesSection({
   deliveries, onAdd, onComplete, onDelete,
 }: {
   deliveries: Delivery[];
-  onAdd: (s: string) => void;
+  onAdd: (s: string, cargo?: string) => void;
   onComplete: (id: string) => void;
   onDelete: (id: string) => void;
 }) {
-  const [input, setInput] = useState('');
+  const [destination, setDestination] = useState('');
+  const [cargo, setCargo] = useState('');
+  const [showCargo, setShowCargo] = useState(false);
+
+  function submit() {
+    onAdd(destination, cargo);
+    setDestination(''); setCargo('');
+  }
+
   return (
     <Section
       title="配送実績"
       right={<span className="text-xs text-slate-500">{deliveries.length} 件</span>}
     >
-      <div className="flex gap-1.5 mb-3">
-        <input
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && input.trim()) { onAdd(input); setInput(''); } }}
-          placeholder="配送先を入力"
-          className="flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
-        />
-        <button
-          onClick={() => { onAdd(input); setInput(''); }}
-          disabled={!input.trim()}
-          className="rounded-lg bg-slate-900 hover:bg-slate-800 text-white px-3 py-2 text-sm font-medium disabled:bg-slate-200 disabled:text-slate-400 inline-flex items-center transition-all"
-        >
-          <Icon.Plus className="w-4 h-4" />
-        </button>
+      <div className="space-y-2 mb-3">
+        <div className="flex gap-1.5">
+          <input
+            type="text"
+            value={destination}
+            onChange={(e) => setDestination(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && destination.trim()) submit(); }}
+            placeholder="配送先を入力"
+            className="flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
+          />
+          <button
+            onClick={() => setShowCargo(!showCargo)}
+            className="px-2.5 py-2 rounded-lg bg-white border border-slate-200 hover:border-slate-400 text-slate-500 text-xs font-medium transition-all"
+          >積載</button>
+          <button
+            onClick={submit}
+            disabled={!destination.trim()}
+            className="rounded-lg bg-slate-900 hover:bg-slate-800 text-white px-3 py-2 text-sm font-medium disabled:bg-slate-200 disabled:text-slate-400 inline-flex items-center transition-all"
+          >
+            <Icon.Plus className="w-4 h-4" />
+          </button>
+        </div>
+        {showCargo && (
+          <input
+            type="text"
+            value={cargo}
+            onChange={(e) => setCargo(e.target.value)}
+            placeholder="積載品目（例: 青果物 20ケース）"
+            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
+          />
+        )}
       </div>
       {deliveries.length === 0 ? (
         <p className="text-center text-xs text-slate-400 py-4">配送記録はまだありません</p>
@@ -511,9 +667,12 @@ function DeliveriesSection({
             <li key={d.id} className="py-2.5 flex items-center justify-between gap-2">
               <div className="flex-1 min-w-0">
                 <div className="text-sm font-medium text-slate-900 truncate">{d.destination}</div>
-                <div className="text-xs text-slate-500 tabular-nums mt-0.5">
-                  {d.arrived_at && `着 ${fmtHM(d.arrived_at)}`}
-                  {d.completed_at && ` · 完了 ${fmtHM(d.completed_at)}`}
+                <div className="text-xs text-slate-500 tabular-nums mt-0.5 flex items-center gap-2">
+                  <span>
+                    {d.arrived_at && `着 ${fmtHM(d.arrived_at)}`}
+                    {d.completed_at && ` · 完了 ${fmtHM(d.completed_at)}`}
+                  </span>
+                  {d.cargo_item && <span className="px-1.5 py-0.5 bg-slate-100 rounded text-slate-600">{d.cargo_item}</span>}
                 </div>
               </div>
               <div className="flex items-center gap-1 shrink-0">
