@@ -189,14 +189,17 @@ export function AdminDashboard() {
           <h2 className="text-2xl font-semibold text-slate-900 tracking-tight">本日の運行状況</h2>
         </div>
 
-        {/* サマリー */}
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+        {/* サマリー（4カードに集約 + 要対応件数） */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <SummaryCard label="提出率" value={`${submissionRate}%`} sub={`${stats.submitted} / ${stats.total} 名`} highlight={submissionRate < 100 ? 'warn' : 'ok'} />
-          <SummaryCard label="配送件数" value={stats.totalDeliveries} sub="本日合計" />
-          <SummaryCard label="走行距離" value={stats.totalDistance.toLocaleString()} sub="km" />
+          <SummaryCard label="配送件数" value={stats.totalDeliveries} sub={`走行 ${stats.totalDistance.toLocaleString()}km`} />
           <SummaryCard label="異常報告" value={stats.anomalies} sub="件" highlight={stats.anomalies > 0 ? 'alert' : 'ok'} />
-          <SummaryCard label="労務違反" value={stats.complianceIssues} sub="名" highlight={stats.complianceIssues > 0 ? 'alert' : 'ok'} />
-          <SummaryCard label="アルコール" value={stats.alcoholIssues} sub="要対応" highlight={stats.alcoholIssues > 0 ? 'alert' : 'ok'} />
+          <SummaryCard
+            label="要対応"
+            value={stats.complianceIssues + stats.alcoholIssues}
+            sub={`労務 ${stats.complianceIssues} · 酒気 ${stats.alcoholIssues}`}
+            highlight={stats.complianceIssues + stats.alcoholIssues > 0 ? 'alert' : 'ok'}
+          />
         </div>
 
         {/* AI要約 */}
