@@ -6,7 +6,6 @@ import { TimeButton } from '@/components/TimeButton';
 import { VoiceRecorder } from '@/components/VoiceRecorder';
 import { OdometerCapture } from '@/components/OdometerCapture';
 import { RollCallSection } from '@/components/RollCallSection';
-import { InspectionSection } from '@/components/InspectionSection';
 import { PhaseStepper, type Phase } from '@/components/PhaseStepper';
 import { Card } from '@/components/Card';
 import { Icon } from '@/components/Icon';
@@ -16,7 +15,7 @@ import {
 } from '@/lib/demo-store';
 import type {
   DailyReport, Delivery, ExtractedReportFields,
-  AnomalyCategory, AnomalySeverity, RollCall, VehicleInspection, ComplianceCheck,
+  AnomalyCategory, AnomalySeverity, RollCall,
 } from '@/lib/types';
 
 export function DriverApp() {
@@ -49,16 +48,12 @@ export function DriverApp() {
 
   const driver = data.profiles.find(p => p.id === data.currentDriverId);
   const drivers = data.profiles.filter(p => p.role === 'driver');
-  const vehicle = data.vehicles.find(v => v.id === report.vehicle_id);
-  const isRefrigerated = vehicle?.vehicle_type?.includes('冷凍') || false;
   const deliveries = data.deliveries.filter(d => d.daily_report_id === report.id);
   const breaks = data.breaks.filter(b => b.daily_report_id === report.id);
   const anomalies = data.anomalies.filter(a => a.daily_report_id === report.id);
   const rollCalls = data.roll_calls.filter(r => r.daily_report_id === report.id);
-  const inspections = data.inspections.filter(i => i.daily_report_id === report.id);
   const preTrip = rollCalls.find(r => r.type === 'pre_trip') || null;
   const postTrip = rollCalls.find(r => r.type === 'post_trip') || null;
-  const preInspection = inspections.find(i => i.inspection_type === 'pre_departure') || null;
   const openBreak = breaks.find(b => b.end_at === null);
 
   const prevReport = data.reports
@@ -70,15 +65,13 @@ export function DriverApp() {
   const preProgress = [
     !!report.vehicle_id,
     !!preTrip,
-    !!preInspection,
     !!report.depart_at,
   ];
   const midProgress = [
     deliveries.length > 0,
-    !!report.depart_at,
+    !!report.return_at,
   ];
   const postProgress = [
-    !!report.return_at,
     !!report.clock_out_at,
     !!report.odometer_end,
     !!postTrip,
@@ -150,11 +143,6 @@ export function DriverApp() {
     data!.roll_calls.push({ id: uid('rc'), daily_report_id: report!.id, ...body });
     saveDemo(data!); refresh();
   }
-  function saveInspection(body: Omit<VehicleInspection, 'id' | 'daily_report_id' | 'inspection_type'>) {
-    data!.inspections = data!.inspections.filter(i => !(i.daily_report_id === report!.id && i.inspection_type === 'pre_departure'));
-    data!.inspections.push({ id: uid('inspection'), daily_report_id: report!.id, inspection_type: 'pre_departure', ...body });
-    saveDemo(data!); refresh();
-  }
   function applyAIFields(fields: ExtractedReportFields) {
     const today = todayStr();
     const toIso = (hhmm?: string): string | undefined => {
@@ -213,8 +201,7 @@ export function DriverApp() {
   function submit() {
     const issues: string[] = [];
     if (!report!.clock_in_at) issues.push('出勤時刻');
-    if (!preTrip) issues.push('出庫前点呼（アルコールチェック）');
-    if (!preInspection) issues.push('始業前点検');
+    if (!preTrip) issues.push('出庫前 アルコールチェック');
     if (issues.length > 0) {
       if (!confirm(`未入力の項目があります:\n・${issues.join('\n・')}\n\nこのまま提出しますか？`)) return;
     }
@@ -310,28 +297,13 @@ export function DriverApp() {
               </select>
             </Card>
 
-            {/* 出庫前 点呼 */}
+            {/* 出庫前 アルコールチェック */}
             <Card
-              title="出庫前 点呼"
+              title="アルコールチェック"
               status={preTrip ? (preTrip.alcohol_result_ok ? 'done' : 'warning') : 'pending'}
               required
             >
               <RollCallSection type="pre_trip" rollCall={preTrip} onSave={(rc) => saveRollCall('pre_trip', rc)} />
-            </Card>
-
-            {/* 始業前点検 */}
-            <Card
-              title="始業前点検"
-              status={preInspection ? 'done' : 'pending'}
-              required
-              collapsible
-              defaultOpen={!preInspection}
-            >
-              <InspectionSection
-                inspection={preInspection}
-                isRefrigerated={isRefrigerated}
-                onSave={saveInspection}
-              />
             </Card>
 
             {/* 出勤・出庫 */}
@@ -431,19 +403,10 @@ export function DriverApp() {
             {/* 経費 */}
             <ExpenseCard report={report} onPatch={patch} />
 
-            {/* 退勤前 点呼 */}
-            <Card title="退勤前 点呼" status={postTrip ? 'done' : 'pending'}>
+            {/* 退勤前 アルコールチェック */}
+            <Card title="退勤前 アルコールチェック" status={postTrip ? 'done' : 'pending'}>
               <RollCallSection type="post_trip" rollCall={postTrip} onSave={(rc) => saveRollCall('post_trip', rc)} />
             </Card>
-
-            {/* 文字起こし */}
-            {report.raw_voice_text && (
-              <Card title="音声入力（AI文字起こし）" collapsible defaultOpen={false}>
-                <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap bg-slate-50 rounded-lg p-3">
-                  {report.raw_voice_text}
-                </p>
-              </Card>
-            )}
           </>
         )}
       </main>
@@ -489,69 +452,27 @@ function StatusBadge({ status }: { status: DailyReport['status'] }) {
 }
 
 function ExpenseCard({ report, onPatch }: { report: DailyReport; onPatch: (p: Partial<DailyReport>) => void }) {
-  const hasAny = report.refueled || report.used_highway;
   return (
-    <Card title="経費" status={hasAny ? 'done' : 'pending'}>
-      <div className="space-y-3">
-        <div className="rounded-lg border border-slate-200 p-3">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-sm font-medium text-slate-700">給油</span>
-            <button
-              onClick={() => onPatch({ refueled: !report.refueled })}
-              className={`px-3 py-1 rounded-full text-xs font-medium border transition-all ${
-                report.refueled ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-500 border-slate-200'
-              }`}
-            >{report.refueled ? 'あり' : 'なし'}</button>
-          </div>
-          {report.refueled && (
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="block text-[10px] text-slate-400 mb-0.5">数量（L）</label>
-                <input
-                  type="number" step="0.1"
-                  value={report.refuel_liters ?? ''}
-                  onChange={(e) => onPatch({ refuel_liters: e.target.value ? parseFloat(e.target.value) : null })}
-                  placeholder="0"
-                  className="w-full text-sm tabular-nums rounded-lg border border-slate-200 px-2.5 py-2 focus:outline-none focus:ring-2 focus:ring-slate-900"
-                />
-              </div>
-              <div>
-                <label className="block text-[10px] text-slate-400 mb-0.5">金額（円）</label>
-                <input
-                  type="number"
-                  value={report.refuel_amount_yen ?? ''}
-                  onChange={(e) => onPatch({ refuel_amount_yen: e.target.value ? parseInt(e.target.value, 10) : null })}
-                  placeholder="0"
-                  className="w-full text-sm tabular-nums rounded-lg border border-slate-200 px-2.5 py-2 focus:outline-none focus:ring-2 focus:ring-slate-900"
-                />
-              </div>
-            </div>
-          )}
-        </div>
-
-        <div className="rounded-lg border border-slate-200 p-3">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-sm font-medium text-slate-700">高速道路</span>
-            <button
-              onClick={() => onPatch({ used_highway: !report.used_highway })}
-              className={`px-3 py-1 rounded-full text-xs font-medium border transition-all ${
-                report.used_highway ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-500 border-slate-200'
-              }`}
-            >{report.used_highway ? '利用' : '未利用'}</button>
-          </div>
-          {report.used_highway && (
-            <div>
-              <label className="block text-[10px] text-slate-400 mb-0.5">料金（円）</label>
-              <input
-                type="number"
-                value={report.highway_fee_yen ?? ''}
-                onChange={(e) => onPatch({ highway_fee_yen: e.target.value ? parseInt(e.target.value, 10) : null })}
-                placeholder="0"
-                className="w-full text-sm tabular-nums rounded-lg border border-slate-200 px-2.5 py-2 focus:outline-none focus:ring-2 focus:ring-slate-900"
-              />
-            </div>
-          )}
-        </div>
+    <Card title="給油・高速">
+      <div className="grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          onClick={() => onPatch({ refueled: !report.refueled })}
+          className={`py-3 rounded-lg text-sm font-medium border transition-all ${
+            report.refueled ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200 hover:border-slate-400'
+          }`}
+        >
+          {report.refueled && '✓ '}給油あり
+        </button>
+        <button
+          type="button"
+          onClick={() => onPatch({ used_highway: !report.used_highway })}
+          className={`py-3 rounded-lg text-sm font-medium border transition-all ${
+            report.used_highway ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200 hover:border-slate-400'
+          }`}
+        >
+          {report.used_highway && '✓ '}高速利用
+        </button>
       </div>
     </Card>
   );
@@ -566,12 +487,10 @@ function DeliveriesCard({
   onDelete: (id: string) => void;
 }) {
   const [destination, setDestination] = useState('');
-  const [cargo, setCargo] = useState('');
-  const [showCargo, setShowCargo] = useState(false);
 
   function submit() {
-    onAdd(destination, cargo);
-    setDestination(''); setCargo('');
+    onAdd(destination);
+    setDestination('');
   }
 
   return (
@@ -580,37 +499,22 @@ function DeliveriesCard({
       status={deliveries.length > 0 ? 'done' : 'pending'}
       right={<span className="text-xs text-slate-500 tabular-nums">{deliveries.length} 件</span>}
     >
-      <div className="space-y-2 mb-3">
-        <div className="flex gap-1.5">
-          <input
-            type="text"
-            value={destination}
-            onChange={(e) => setDestination(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && destination.trim()) submit(); }}
-            placeholder="配送先を入力"
-            className="flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
-          />
-          <button
-            onClick={() => setShowCargo(!showCargo)}
-            className="px-2.5 py-2 rounded-lg bg-white border border-slate-200 hover:border-slate-400 text-slate-500 text-xs font-medium transition-all"
-          >積載</button>
-          <button
-            onClick={submit}
-            disabled={!destination.trim()}
-            className="rounded-lg bg-slate-900 hover:bg-slate-800 text-white px-3 py-2 text-sm font-medium disabled:bg-slate-200 disabled:text-slate-400 inline-flex items-center transition-all"
-          >
-            <Icon.Plus className="w-4 h-4" />
-          </button>
-        </div>
-        {showCargo && (
-          <input
-            type="text"
-            value={cargo}
-            onChange={(e) => setCargo(e.target.value)}
-            placeholder="積載品目（例: 青果物 20ケース）"
-            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
-          />
-        )}
+      <div className="flex gap-1.5 mb-3">
+        <input
+          type="text"
+          value={destination}
+          onChange={(e) => setDestination(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && destination.trim()) submit(); }}
+          placeholder="配送先を入力"
+          className="flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
+        />
+        <button
+          onClick={submit}
+          disabled={!destination.trim()}
+          className="rounded-lg bg-slate-900 hover:bg-slate-800 text-white px-3 py-2 text-sm font-medium disabled:bg-slate-200 disabled:text-slate-400 inline-flex items-center transition-all"
+        >
+          <Icon.Plus className="w-4 h-4" />
+        </button>
       </div>
       {deliveries.length === 0 ? (
         <p className="text-center text-xs text-slate-400 py-4">配送先を追加してください</p>
@@ -620,12 +524,9 @@ function DeliveriesCard({
             <li key={d.id} className="py-2.5 flex items-center justify-between gap-2">
               <div className="flex-1 min-w-0">
                 <div className="text-sm font-medium text-slate-900 truncate">{d.destination}</div>
-                <div className="text-xs text-slate-500 tabular-nums mt-0.5 flex items-center gap-2">
-                  <span>
-                    {d.arrived_at && `着 ${fmtHM(d.arrived_at)}`}
-                    {d.completed_at && ` · 完了 ${fmtHM(d.completed_at)}`}
-                  </span>
-                  {d.cargo_item && <span className="px-1.5 py-0.5 bg-slate-100 rounded text-slate-600">{d.cargo_item}</span>}
+                <div className="text-xs text-slate-500 tabular-nums mt-0.5">
+                  {d.arrived_at && `着 ${fmtHM(d.arrived_at)}`}
+                  {d.completed_at && ` · 完了 ${fmtHM(d.completed_at)}`}
                 </div>
               </div>
               <div className="flex items-center gap-1 shrink-0">
@@ -658,37 +559,28 @@ function AnomalyCard({
   onAdd: (cat: AnomalyCategory, sev: AnomalySeverity, desc: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [category, setCategory] = useState<AnomalyCategory>('vehicle');
-  const [severity, setSeverity] = useState<AnomalySeverity>('low');
   const [desc, setDesc] = useState('');
 
   function add() {
     if (!desc.trim()) return;
-    onAdd(category, severity, desc.trim());
+    onAdd('other', 'medium', desc.trim());
     setDesc(''); setOpen(false);
   }
 
   return (
     <Card
-      title="異常報告"
-      status={anomalies.length > 0 ? (anomalies.some(a => a.severity === 'high') ? 'warning' : 'done') : 'pending'}
+      title="異常・トラブル"
+      status={anomalies.length > 0 ? 'warning' : 'pending'}
       right={anomalies.length > 0 ? <span className="text-xs font-medium text-red-600">{anomalies.length} 件</span> : null}
     >
       {anomalies.length > 0 && (
-        <ul className="space-y-2 mb-3">
+        <ul className="space-y-1.5 mb-3">
           {anomalies.map(a => (
-            <li key={a.id} className={`rounded-lg p-3 border ${
-              a.severity === 'high' ? 'bg-red-50 border-red-200' :
-              a.severity === 'medium' ? 'bg-amber-50 border-amber-200' :
-              'bg-slate-50 border-slate-200'
-            }`}>
-              <div className="flex items-center gap-2 text-xs font-semibold mb-0.5">
-                <Icon.Alert className={`w-3.5 h-3.5 ${a.severity === 'high' ? 'text-red-600' : a.severity === 'medium' ? 'text-amber-600' : 'text-slate-500'}`} />
-                <span>{categoryLabel(a.category)}</span>
-                <span className="text-slate-400">·</span>
-                <span className={a.severity === 'high' ? 'text-red-600' : a.severity === 'medium' ? 'text-amber-600' : 'text-slate-500'}>{sevLabel(a.severity)}</span>
+            <li key={a.id} className="rounded-lg p-2.5 border bg-red-50 border-red-200">
+              <div className="flex items-center gap-1.5 text-xs">
+                <Icon.Alert className="w-3.5 h-3.5 text-red-600" />
+                <p className="text-slate-700">{a.description}</p>
               </div>
-              <p className="text-sm text-slate-700">{a.description}</p>
             </li>
           ))}
         </ul>
@@ -702,39 +594,13 @@ function AnomalyCard({
           <Icon.Plus className="w-4 h-4" />異常を報告
         </button>
       ) : (
-        <div className="space-y-3">
-          <select
-            value={category}
-            onChange={(e) => setCategory(e.target.value as AnomalyCategory)}
-            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
-          >
-            <option value="vehicle">車両異常</option>
-            <option value="delay">遅延</option>
-            <option value="accident">事故</option>
-            <option value="damage">荷物破損</option>
-            <option value="near_miss">ヒヤリハット</option>
-            <option value="other">その他</option>
-          </select>
-          <div className="grid grid-cols-3 gap-1.5">
-            {(['low', 'medium', 'high'] as AnomalySeverity[]).map(s => (
-              <button
-                key={s}
-                onClick={() => setSeverity(s)}
-                className={`py-2 rounded-lg text-xs font-medium border transition-all ${
-                  severity === s
-                    ? s === 'high' ? 'bg-red-600 text-white border-red-600' :
-                      s === 'medium' ? 'bg-amber-500 text-white border-amber-500' :
-                      'bg-slate-900 text-white border-slate-900'
-                    : 'bg-white text-slate-600 border-slate-200'
-                }`}
-              >{sevLabel(s)}</button>
-            ))}
-          </div>
+        <div className="space-y-2">
           <textarea
             value={desc}
             onChange={(e) => setDesc(e.target.value)}
-            placeholder="状況を入力"
-            rows={2}
+            placeholder="例：仙台便で30分遅延、車両右後方ランプ不調"
+            rows={3}
+            autoFocus
             className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900 resize-none"
           />
           <div className="flex gap-2">
@@ -755,10 +621,4 @@ function formatDateLabel(date: string): string {
   const d = new Date(date);
   const days = ['日', '月', '火', '水', '木', '金', '土'];
   return `${d.getMonth() + 1}/${d.getDate()}（${days[d.getDay()]}）`;
-}
-function categoryLabel(c: AnomalyCategory): string {
-  return { vehicle: '車両異常', delay: '遅延', accident: '事故', damage: '荷物破損', near_miss: 'ヒヤリハット', other: 'その他' }[c];
-}
-function sevLabel(s: AnomalySeverity): string {
-  return { low: '軽微', medium: '中程度', high: '重大' }[s];
 }
