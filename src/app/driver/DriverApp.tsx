@@ -11,7 +11,7 @@ import { Card } from '@/components/Card';
 import { Icon } from '@/components/Icon';
 import {
   loadDemo, saveDemo, getOrCreateTodayReport, updateReport, uid, todayStr,
-  checkCompliance, type DemoData,
+  checkCompliance, PRESET_DESTINATIONS, type DemoData,
 } from '@/lib/demo-store';
 import type {
   DailyReport, Delivery, ExtractedReportFields,
@@ -487,11 +487,24 @@ function DeliveriesCard({
   onDelete: (id: string) => void;
 }) {
   const [destination, setDestination] = useState('');
+  const [showAll, setShowAll] = useState(false);
 
-  function submit() {
-    onAdd(destination);
+  function submit(name?: string) {
+    const target = (name ?? destination).trim();
+    if (!target) return;
+    onAdd(target);
     setDestination('');
   }
+
+  // 既に追加済みの配送先名
+  const usedNames = new Set(deliveries.map(d => d.destination));
+  const visibleCount = showAll ? PRESET_DESTINATIONS.length : 6;
+  const visiblePresets = PRESET_DESTINATIONS.slice(0, visibleCount);
+
+  // 入力中のフィルタリング候補（自由入力時のサジェスト）
+  const suggestions = destination.trim()
+    ? PRESET_DESTINATIONS.filter(p => p.includes(destination.trim()) && !usedNames.has(p)).slice(0, 4)
+    : [];
 
   return (
     <Card
@@ -499,27 +512,77 @@ function DeliveriesCard({
       status={deliveries.length > 0 ? 'done' : 'pending'}
       right={<span className="text-xs text-slate-500 tabular-nums">{deliveries.length} 件</span>}
     >
-      <div className="flex gap-1.5 mb-3">
-        <input
-          type="text"
-          value={destination}
-          onChange={(e) => setDestination(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && destination.trim()) submit(); }}
-          placeholder="配送先を入力"
-          className="flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
-        />
-        <button
-          onClick={submit}
-          disabled={!destination.trim()}
-          className="rounded-lg bg-slate-900 hover:bg-slate-800 text-white px-3 py-2 text-sm font-medium disabled:bg-slate-200 disabled:text-slate-400 inline-flex items-center transition-all"
-        >
-          <Icon.Plus className="w-4 h-4" />
-        </button>
+      {/* クイック選択チップ */}
+      <div className="mb-3">
+        <div className="flex items-center justify-between mb-1.5">
+          <span className="text-[10px] font-semibold text-slate-500 tracking-wider uppercase">配送先を選ぶ</span>
+          <button
+            onClick={() => setShowAll(!showAll)}
+            className="text-[10px] text-slate-500 hover:text-slate-900"
+          >
+            {showAll ? '閉じる' : `他 ${PRESET_DESTINATIONS.length - 6} 件 ▾`}
+          </button>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {visiblePresets.map(name => {
+            const used = usedNames.has(name);
+            return (
+              <button
+                key={name}
+                onClick={() => !used && submit(name)}
+                disabled={used}
+                className={`px-2.5 py-1.5 rounded-full text-xs font-medium border transition-all ${
+                  used
+                    ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed line-through'
+                    : 'bg-white text-slate-700 border-slate-200 hover:border-slate-900 hover:bg-slate-900 hover:text-white active:scale-95'
+                }`}
+              >
+                {used && '✓ '}{name}
+              </button>
+            );
+          })}
+        </div>
       </div>
+
+      {/* 自由入力（新規配送先） */}
+      <div className="border-t border-slate-100 pt-3">
+        <div className="flex gap-1.5 relative">
+          <input
+            type="text"
+            value={destination}
+            onChange={(e) => setDestination(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && destination.trim()) submit(); }}
+            placeholder="その他の配送先を入力"
+            className="flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
+          />
+          <button
+            onClick={() => submit()}
+            disabled={!destination.trim()}
+            className="rounded-lg bg-slate-900 hover:bg-slate-800 text-white px-3 py-2 text-sm font-medium disabled:bg-slate-200 disabled:text-slate-400 inline-flex items-center transition-all"
+          >
+            <Icon.Plus className="w-4 h-4" />
+          </button>
+        </div>
+        {suggestions.length > 0 && (
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {suggestions.map(s => (
+              <button
+                key={s}
+                onClick={() => submit(s)}
+                className="px-2 py-0.5 rounded text-[11px] bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100"
+              >
+                {s}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* 配送リスト */}
       {deliveries.length === 0 ? (
-        <p className="text-center text-xs text-slate-400 py-4">配送先を追加してください</p>
+        <p className="text-center text-xs text-slate-400 py-4 mt-3">配送先を選んで追加してください</p>
       ) : (
-        <ul className="divide-y divide-slate-100">
+        <ul className="divide-y divide-slate-100 mt-3 border-t border-slate-100 pt-2">
           {deliveries.map(d => (
             <li key={d.id} className="py-2.5 flex items-center justify-between gap-2">
               <div className="flex-1 min-w-0">
