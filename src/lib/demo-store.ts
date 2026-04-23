@@ -4,10 +4,11 @@
 import type {
   DailyReport, Delivery, Break, Anomaly, Profile, Vehicle,
   RollCall, VehicleInspection, ComplianceCheck,
+  AnomalyCategory, AnomalySeverity,
 } from './types';
 
 const KEY = 'logistics-demo-data';
-const STORAGE_VERSION = 3;  // スキーマ変更時にインクリメント
+const STORAGE_VERSION = 4;  // スキーマ変更時にインクリメント
 
 export interface DemoData {
   version: number;
@@ -54,7 +55,7 @@ const VEHICLES: Vehicle[] = [
 ];
 
 // === サンプル日報生成 ===
-// 過去5日分 × 3ドライバー = 15件のサンプル
+// 過去14日分 × 3ドライバーで、休日・異常・労務警戒など多様なバリエーション
 function buildSeedReports(): {
   reports: DailyReport[];
   deliveries: Delivery[];
@@ -74,6 +75,10 @@ function buildSeedReports(): {
     { id: 'driver-takahashi', vehicleId: 'v-103', odoBase: 156200 },
   ];
 
+  // 配送先プール（地域別）
+  const localDests = ['仙台中央市場', '名取センター', '高倉町（仙台店）', 'ワイズマート 本店', '服部 物流DC', 'イオン泉中央', 'ヨークベニマル長町', 'マルチョウ大和田', 'イトーヨーカドー仙台店'];
+  const farDests = ['福島デポ', '郡山倉庫', '山形営業所'];
+
   function dateAt(daysAgo: number): string {
     const d = new Date();
     d.setDate(d.getDate() - daysAgo);
@@ -86,100 +91,168 @@ function buildSeedReports(): {
     return d.toISOString();
   }
 
-  // 過去4日分は全員提出済みの通常パターン
-  for (let dayAgo = 4; dayAgo >= 1; dayAgo--) {
+  // 各ドライバー独自の odometer 累積を管理
+  const odoMap: Record<string, number> = {};
+  drivers.forEach(dv => { odoMap[dv.id] = dv.odoBase; });
+
+  // バリエーション定義: dayAgo → driverIdx → pattern
+  // pattern: { skip?, pattern, anomaly?, alcoholOver?, longDay? }
+  const variations: Record<string, {
+    skip?: boolean;
+    longDuty?: boolean;        // 拘束時間長い（労務警戒）
+    veryLongDuty?: boolean;    // 拘束時間超過（労務違反）
+    alcoholOver?: number;       // アルコール検知（mg/L）
+    anomaly?: { category: AnomalyCategory; severity: AnomalySeverity; desc: string };
+    refuel?: boolean;
+    highway?: boolean;
+    farTrip?: boolean;          // 遠方ルート（走行距離増）
+  }> = {
+    // 13日前: 通常
+    // 12日前: 高橋休み
+    '12-2': { skip: true },
+    // 11日前: 鈴木が事故ヒヤリハット
+    '11-1': { anomaly: { category: 'near_miss', severity: 'medium', desc: '国道4号で前方車両の急ブレーキ。車間距離不足を反省' } },
+    // 10日前: 佐藤が長時間運行（労務警戒）
+    '10-0': { longDuty: true, anomaly: { category: 'delay', severity: 'low', desc: '荷主側受け入れ遅延で帰庫が遅くなった' } },
+    // 9日前: 高橋が遠方便、給油+高速
+    '9-2': { farTrip: true, refuel: true, highway: true },
+    // 8日前: 鈴木が車両異常
+    '8-1': { anomaly: { category: 'vehicle', severity: 'medium', desc: '右側サイドミラー固定部にガタつき。整備依頼済み' } },
+    // 7日前: 佐藤休み、鈴木が事故（重大）
+    '7-0': { skip: true },
+    '7-1': { anomaly: { category: 'damage', severity: 'high', desc: '荷台で青果ケース1箱が落下、外箱破損。荷主と協議し賠償手続き中' } },
+    // 6日前: 通常
+    // 5日前: 高橋が拘束時間超過（労務違反）
+    '5-2': { veryLongDuty: true, anomaly: { category: 'delay', severity: 'medium', desc: '東北道事故渋滞で帰庫が大幅遅延' }, highway: true },
+    // 4日前: 佐藤がアルコール検知（要対応）
+    '4-0': { alcoholOver: 0.18, anomaly: { category: 'other', severity: 'high', desc: '出庫前点呼でアルコール検知、乗務交代' } },
+    // 3日前: 鈴木 遅延
+    '3-1': { anomaly: { category: 'delay', severity: 'low', desc: '名取センターで荷待ち30分、次便に20分遅延' } },
+    // 2日前: 佐藤 遅延、鈴木 拘束長い
+    '2-0': { anomaly: { category: 'delay', severity: 'medium', desc: '高倉町仙台店で受領担当者不在のため45分待機' } },
+    '2-1': { longDuty: true },
+    // 1日前: 佐藤 給油、鈴木 高速
+    '1-0': { refuel: true },
+    '1-1': { highway: true },
+    // 1日前: 高橋 ヒヤリハット
+    '1-2': { anomaly: { category: 'near_miss', severity: 'low', desc: '交差点右折時に自転車の飛び出しを目視で回避' } },
+  };
+
+  // 過去14日分のループ
+  for (let dayAgo = 14; dayAgo >= 1; dayAgo--) {
     drivers.forEach((dv, dIdx) => {
+      const key = `${dayAgo}-${dIdx}`;
+      const v = variations[key] || {};
+      if (v.skip) return;
+
       const reportId = `seed-r-${dayAgo}-${dv.id}`;
-      const odoStart = dv.odoBase + (4 - dayAgo) * 150 + dIdx * 30;
-      const distance = 130 + Math.floor(Math.random() * 50);
+      const distance = v.farTrip ? 280 + Math.floor((dayAgo * 7 + dIdx * 13) % 60)
+        : 110 + Math.floor((dayAgo * 11 + dIdx * 17) % 80);
+      const odoStart = odoMap[dv.id];
       const odoEnd = odoStart + distance;
+      odoMap[dv.id] = odoEnd;
+
+      // 時刻計算
       const departHour = 8;
       const departMin = [0, 15, 30][dIdx];
-      const returnHour = 17;
-      const returnMin = [10, 25, 40][dIdx];
-      const isBigDay = dayAgo === 2 && dIdx === 1;  // 拘束時間長い日
+      let returnHour = 17;
+      let returnMin = [10, 25, 40][dIdx];
+      let clockOutHour = 17;
+      let clockOutMin = [25, 40, 55][dIdx];
+      if (v.longDuty) { returnHour = 19; returnMin = 50; clockOutHour = 20; clockOutMin = 30; }
+      if (v.veryLongDuty) { returnHour = 22; returnMin = 30; clockOutHour = 23; clockOutMin = 0; }
+      if (v.farTrip) { returnHour = 18; returnMin = 30; clockOutHour = 19; clockOutMin = 0; }
 
       reports.push({
         id: reportId, company_id: COMPANY_ID, driver_id: dv.id, vehicle_id: dv.vehicleId,
         report_date: dateAt(dayAgo),
         clock_in_at: isoAt(dayAgo, 7, 30),
         depart_at: isoAt(dayAgo, departHour, departMin),
-        return_at: isoAt(dayAgo, isBigDay ? 19 : returnHour, isBigDay ? 50 : returnMin),
-        clock_out_at: isoAt(dayAgo, isBigDay ? 20 : 17, isBigDay ? 30 : 50),
+        return_at: isoAt(dayAgo, returnHour, returnMin),
+        clock_out_at: isoAt(dayAgo, clockOutHour, clockOutMin),
         odometer_start: odoStart, odometer_end: odoEnd, total_distance_km: distance,
-        delivery_count: 0,  // 後で更新
-        refueled: dayAgo === 3 && dIdx === 0, refuel_liters: null, refuel_amount_yen: null, refuel_station: null,
-        used_highway: dIdx === 1, highway_fee_yen: null,
-        has_anomaly: false,
+        delivery_count: 0,
+        refueled: !!v.refuel, refuel_liters: null, refuel_amount_yen: null, refuel_station: null,
+        used_highway: !!v.highway, highway_fee_yen: null,
+        has_anomaly: !!v.anomaly,
         notes: null, ai_summary: null, raw_voice_text: null,
         status: 'submitted',
-        submitted_at: isoAt(dayAgo, 18, 0),
+        submitted_at: isoAt(dayAgo, clockOutHour, clockOutMin + 5),
         approved_at: null, approved_by: null,
-        created_at: isoAt(dayAgo, 7, 30), updated_at: isoAt(dayAgo, 18, 0),
+        created_at: isoAt(dayAgo, 7, 30), updated_at: isoAt(dayAgo, clockOutHour, clockOutMin + 5),
       });
 
-      // 配送3-5件
-      const destPool = ['仙台中央市場', '名取センター', '高倉町（仙台店）', 'ワイズマート 本店', '服部 物流DC', 'イオン泉中央', 'ヨークベニマル長町'];
-      const numDeliveries = 3 + ((dayAgo + dIdx) % 3);
+      // 配送3-7件
+      const numDeliveries = v.farTrip ? 2 : (v.veryLongDuty ? 7 : 3 + ((dayAgo + dIdx) % 4));
+      const pool = v.farTrip ? farDests : localDests;
       for (let i = 0; i < numDeliveries; i++) {
-        const arrHour = 9 + i * 2;
+        const arrHour = 9 + Math.floor(i * (returnHour - 9) / Math.max(numDeliveries, 1));
+        const arrMin = (dIdx * 7 + i * 11) % 50;
         deliveries.push({
           id: `seed-d-${reportId}-${i}`, daily_report_id: reportId,
-          destination: destPool[(dayAgo * 2 + dIdx + i) % destPool.length],
-          arrived_at: isoAt(dayAgo, arrHour, 15),
-          completed_at: isoAt(dayAgo, arrHour, 35),
+          destination: pool[(dayAgo * 2 + dIdx + i) % pool.length],
+          arrived_at: isoAt(dayAgo, arrHour, arrMin),
+          completed_at: isoAt(dayAgo, arrHour, arrMin + 20),
           cargo_item: null, cargo_quantity: null, cargo_weight_kg: null,
           notes: null, receipt_image_url: null,
         });
       }
       reports[reports.length - 1].delivery_count = numDeliveries;
 
-      // 休憩
+      // 休憩（長時間勤務日は2回）
       breaks.push({
-        id: `seed-b-${reportId}`, daily_report_id: reportId,
+        id: `seed-b-${reportId}-1`, daily_report_id: reportId,
         start_at: isoAt(dayAgo, 12, 0), end_at: isoAt(dayAgo, 13, 0),
       });
+      if (v.longDuty || v.veryLongDuty || v.farTrip) {
+        breaks.push({
+          id: `seed-b-${reportId}-2`, daily_report_id: reportId,
+          start_at: isoAt(dayAgo, 15, 30), end_at: isoAt(dayAgo, 15, 50),
+        });
+      }
 
       // 点呼（出庫前 + 退勤前）
+      const alcoholValue = v.alcoholOver || 0;
+      const alcoholOk = alcoholValue < 0.15;
       roll_calls.push({
         id: `seed-rc-pre-${reportId}`, daily_report_id: reportId,
         type: 'pre_trip', performed_at: isoAt(dayAgo, 7, 35),
         alcohol_check_method: 'face_to_face', alcohol_detector_used: true,
-        alcohol_value_mg: 0, alcohol_result_ok: true,
+        alcohol_value_mg: alcoholValue, alcohol_result_ok: alcoholOk,
         health_status: null, sleep_hours: null, fatigue_level: null,
         confirmed_by_name: null, notes: null,
       });
-      roll_calls.push({
-        id: `seed-rc-post-${reportId}`, daily_report_id: reportId,
-        type: 'post_trip', performed_at: isoAt(dayAgo, isBigDay ? 20 : 17, isBigDay ? 25 : 45),
-        alcohol_check_method: 'face_to_face', alcohol_detector_used: true,
-        alcohol_value_mg: 0, alcohol_result_ok: true,
-        health_status: null, sleep_hours: null, fatigue_level: null,
-        confirmed_by_name: null, notes: null,
-      });
+      if (alcoholOk) {
+        roll_calls.push({
+          id: `seed-rc-post-${reportId}`, daily_report_id: reportId,
+          type: 'post_trip', performed_at: isoAt(dayAgo, clockOutHour, clockOutMin - 5),
+          alcohol_check_method: 'face_to_face', alcohol_detector_used: true,
+          alcohol_value_mg: 0, alcohol_result_ok: true,
+          health_status: null, sleep_hours: null, fatigue_level: null,
+          confirmed_by_name: null, notes: null,
+        });
+      }
 
-      // 異常: 3日前の鈴木に1件、2日前の佐藤に1件
-      if ((dayAgo === 3 && dIdx === 1) || (dayAgo === 2 && dIdx === 0)) {
+      // 異常
+      if (v.anomaly) {
         anomalies.push({
           id: `seed-a-${reportId}`, daily_report_id: reportId,
-          category: 'delay', severity: dayAgo === 2 ? 'medium' : 'low',
-          description: dayAgo === 3
-            ? '名取センターで荷待ち30分、次便に20分遅延'
-            : '高倉町仙台店で受領担当者不在のため15分待機',
+          category: v.anomaly.category, severity: v.anomaly.severity,
+          description: v.anomaly.desc,
           image_url: null, resolved: false,
         });
-        reports[reports.length - 1].has_anomaly = true;
       }
     });
   }
 
-  // 今日: 佐藤=提出済み、鈴木=運行中（出庫済み・帰庫前）、高橋=未着手
+  // 今日: 佐藤=提出済み、鈴木=運行中、高橋=未着手
   // 1: 佐藤 (提出済み)
   {
     const dv = drivers[0];
     const reportId = `seed-r-0-${dv.id}`;
-    const odoStart = dv.odoBase + 4 * 150;
+    const odoStart = odoMap[dv.id];
     const distance = 142;
+    odoMap[dv.id] += distance;
     reports.push({
       id: reportId, company_id: COMPANY_ID, driver_id: dv.id, vehicle_id: dv.vehicleId,
       report_date: dateAt(0),
@@ -232,7 +305,7 @@ function buildSeedReports(): {
   {
     const dv = drivers[1];
     const reportId = `seed-r-0-${dv.id}`;
-    const odoStart = dv.odoBase + 4 * 150;
+    const odoStart = odoMap[dv.id];
     reports.push({
       id: reportId, company_id: COMPANY_ID, driver_id: dv.id, vehicle_id: dv.vehicleId,
       report_date: dateAt(0),
@@ -279,7 +352,7 @@ function buildSeedReports(): {
     });
   }
 
-  // 3: 高橋 (今日 未着手 = レポート未作成。何も追加しない)
+  // 3: 高橋 (今日 未着手 = レポート未作成)
 
   return { reports, deliveries, breaks, anomalies, roll_calls };
 }
