@@ -35,4 +35,4 @@ npm run dev
 
 ---
 
-Built by [Keigo Yoshinaga](https://github.com/yoshinagak-sudo) — CEO of Butai Farm, a Japanese agricultural and food-logistics business. Part of the in-house operational toolkit running our own fleet.
+Built by [Keigo Yoshinaga](https://github.com/yoshinagak-sudo) — Project Lead, Future Strategy Dept @ Butai Farm, a Japanese agricultural and food-logistics business. Part of the in-house operational toolkit running our own fleet.
